@@ -157,7 +157,7 @@ void ACharacterBase::HandleAbilityInputReleased(EAbilityInputSlot InputSlot)
 		return;
 	}
 
-	SendAbilityInputEvent(InputSlot, false);
+	// SendAbilityInputEvent(InputSlot, false);
 
 	// AbilitySystemComponent->AbilityLocalInputReleased(static_cast<int32>(InputSlot));
 }
