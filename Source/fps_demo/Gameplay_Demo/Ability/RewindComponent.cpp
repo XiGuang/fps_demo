@@ -90,8 +90,7 @@ bool URewindComponent::StartRewind()
 	}
 
 	RewindPlaybackElapsedSeconds = 0.0f;
-	RewindPlaybackStartTimestampSeconds = StartingSnapshot.TimestampSeconds;
-	RewindPlaybackTargetTimestampSeconds = TargetSnapshot.TimestampSeconds;
+	BuildRewindPlaybackPath(StartingSnapshot, TargetSnapshot);
 	bIsRewinding = true;
 
 	ApplyVisibilityState(true);
@@ -125,8 +124,9 @@ void URewindComponent::FinishRewindPlayback()
 	}
 
 	FRewindStateSnapshot FinalSnapshot;
-	if (SampleSnapshotAtTime(RewindPlaybackTargetTimestampSeconds, FinalSnapshot))
+	if (RewindPlaybackPath.Num() > 0)
 	{
+		FinalSnapshot = RewindPlaybackPath.Last();
 		ApplySnapshot(FinalSnapshot);
 	}
 
@@ -149,6 +149,8 @@ void URewindComponent::FinishRewindPlayback()
 	}
 
 	bHasCachedMovementMode = false;
+	RewindPlaybackPath.Reset();
+	RewindPlaybackTotalDistance = 0.0f;
 	LastRecordTimestampSeconds = -1.0f;
 	RecordSnapshot();
 }
@@ -233,6 +235,88 @@ bool URewindComponent::SampleSnapshotAtTime(float TargetTimestampSeconds, FRewin
 	return true;
 }
 
+void URewindComponent::BuildRewindPlaybackPath(const FRewindStateSnapshot& StartingSnapshot, const FRewindStateSnapshot& TargetSnapshot)
+{
+	RewindPlaybackPath.Reset();
+	RewindPlaybackTotalDistance = 0.0f;
+
+	RewindPlaybackPath.Add(StartingSnapshot);
+
+	for (int32 Index = RewindHistory.Num() - 1; Index >= 0; --Index)
+	{
+		const FRewindStateSnapshot& Snapshot = RewindHistory[Index];
+		const bool bInsidePlaybackWindow =
+			Snapshot.TimestampSeconds < StartingSnapshot.TimestampSeconds - KINDA_SMALL_NUMBER &&
+			Snapshot.TimestampSeconds > TargetSnapshot.TimestampSeconds + KINDA_SMALL_NUMBER;
+
+		if (bInsidePlaybackWindow)
+		{
+			RewindPlaybackPath.Add(Snapshot);
+		}
+	}
+
+	RewindPlaybackPath.Add(TargetSnapshot);
+
+	for (int32 Index = 0; Index < RewindPlaybackPath.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			RewindPlaybackTotalDistance += FVector::Dist(
+				RewindPlaybackPath[Index - 1].Location,
+				RewindPlaybackPath[Index].Location);
+		}
+
+		RewindPlaybackPath[Index].DistanceAlongRewindPath = RewindPlaybackTotalDistance;
+	}
+}
+
+bool URewindComponent::SampleSnapshotAtDistance(float TargetDistance, FRewindStateSnapshot& OutSnapshot) const
+{
+	if (RewindPlaybackPath.Num() == 0)
+	{
+		return false;
+	}
+
+	if (TargetDistance <= 0.0f || RewindPlaybackTotalDistance <= KINDA_SMALL_NUMBER)
+	{
+		OutSnapshot = RewindPlaybackPath[0];
+		return true;
+	}
+
+	if (TargetDistance >= RewindPlaybackTotalDistance)
+	{
+		OutSnapshot = RewindPlaybackPath.Last();
+		return true;
+	}
+
+	for (int32 Index = 1; Index < RewindPlaybackPath.Num(); ++Index)
+	{
+		const FRewindStateSnapshot& Previous = RewindPlaybackPath[Index - 1];
+		const FRewindStateSnapshot& Next = RewindPlaybackPath[Index];
+
+		if (TargetDistance <= Next.DistanceAlongRewindPath)
+		{
+			const float DistanceSpan = FMath::Max(
+				Next.DistanceAlongRewindPath - Previous.DistanceAlongRewindPath,
+				KINDA_SMALL_NUMBER);
+			const float Alpha = FMath::Clamp(
+				(TargetDistance - Previous.DistanceAlongRewindPath) / DistanceSpan,
+				0.0f,
+				1.0f);
+
+			OutSnapshot.Location = FMath::Lerp(Previous.Location, Next.Location, Alpha);
+			OutSnapshot.ActorRotation = LerpRotatorShortestPath(Previous.ActorRotation, Next.ActorRotation, Alpha);
+			OutSnapshot.ControlRotation = LerpRotatorShortestPath(Previous.ControlRotation, Next.ControlRotation, Alpha);
+			OutSnapshot.TimestampSeconds = FMath::Lerp(Previous.TimestampSeconds, Next.TimestampSeconds, Alpha);
+			OutSnapshot.DistanceAlongRewindPath = TargetDistance;
+			return true;
+		}
+	}
+
+	OutSnapshot = RewindPlaybackPath.Last();
+	return true;
+}
+
 void URewindComponent::ApplyVisibilityState(bool bHideFromOtherPlayers)
 {
 	if (GetOwner() && GetOwner()->HasAuthority())
@@ -274,13 +358,21 @@ void URewindComponent::UpdateRewindPlayback(float DeltaTime)
 	RewindPlaybackElapsedSeconds = FMath::Min(RewindPlaybackElapsedSeconds + DeltaTime, PlaybackDuration);
 
 	const float PlaybackAlpha = RewindPlaybackElapsedSeconds / PlaybackDuration;
-	const float TargetTimestampSeconds = FMath::Lerp(
-		RewindPlaybackStartTimestampSeconds,
-		RewindPlaybackTargetTimestampSeconds,
-		PlaybackAlpha);
+	const float TargetDistance = RewindPlaybackTotalDistance * PlaybackAlpha;
 
 	FRewindStateSnapshot PlaybackSnapshot;
-	if (SampleSnapshotAtTime(TargetTimestampSeconds, PlaybackSnapshot))
+	if (RewindPlaybackTotalDistance <= KINDA_SMALL_NUMBER && RewindPlaybackPath.Num() >= 2)
+	{
+		const FRewindStateSnapshot& StartSnapshot = RewindPlaybackPath[0];
+		const FRewindStateSnapshot& TargetSnapshot = RewindPlaybackPath.Last();
+		PlaybackSnapshot.Location = FMath::Lerp(StartSnapshot.Location, TargetSnapshot.Location, PlaybackAlpha);
+		PlaybackSnapshot.ActorRotation = LerpRotatorShortestPath(StartSnapshot.ActorRotation, TargetSnapshot.ActorRotation, PlaybackAlpha);
+		PlaybackSnapshot.ControlRotation = LerpRotatorShortestPath(StartSnapshot.ControlRotation, TargetSnapshot.ControlRotation, PlaybackAlpha);
+		PlaybackSnapshot.TimestampSeconds = FMath::Lerp(StartSnapshot.TimestampSeconds, TargetSnapshot.TimestampSeconds, PlaybackAlpha);
+		PlaybackSnapshot.DistanceAlongRewindPath = 0.0f;
+		ApplySnapshot(PlaybackSnapshot);
+	}
+	else if (SampleSnapshotAtDistance(TargetDistance, PlaybackSnapshot))
 	{
 		ApplySnapshot(PlaybackSnapshot);
 	}

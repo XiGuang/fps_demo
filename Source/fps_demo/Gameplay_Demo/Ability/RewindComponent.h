@@ -23,6 +23,9 @@ struct FRewindStateSnapshot
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rewind")
 	float TimestampSeconds = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rewind")
+	float DistanceAlongRewindPath = 0.0f;
 };
 
 UCLASS(ClassGroup=(Custom), BlueprintType, Blueprintable, meta=(BlueprintSpawnableComponent))
@@ -59,6 +62,8 @@ protected:
 
 	void RecordSnapshot();
 	bool SampleSnapshotAtTime(float TargetTimestampSeconds, FRewindStateSnapshot& OutSnapshot) const;
+	void BuildRewindPlaybackPath(const FRewindStateSnapshot& StartingSnapshot, const FRewindStateSnapshot& TargetSnapshot);
+	bool SampleSnapshotAtDistance(float TargetDistance, FRewindStateSnapshot& OutSnapshot) const;
 	void ApplyVisibilityState(bool bHideFromOtherPlayers);
 	void ApplyVisibilityToOwner() const;
 	float GetCurrentTimeSeconds() const;
@@ -75,8 +80,9 @@ private:
 
 	float LastRecordTimestampSeconds = -1.0f;
 	float RewindPlaybackElapsedSeconds = 0.0f;
-	float RewindPlaybackStartTimestampSeconds = 0.0f;
-	float RewindPlaybackTargetTimestampSeconds = 0.0f;
+	float RewindPlaybackTotalDistance = 0.0f;
+	UPROPERTY()
+	TArray<FRewindStateSnapshot> RewindPlaybackPath;
 	bool bIsRewinding = false;
 	TEnumAsByte<EMovementMode> CachedMovementMode = MOVE_Walking;
 	uint8 CachedCustomMovementMode = 0;

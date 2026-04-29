@@ -28,6 +28,14 @@ public:
 	FGameplayAttributeData CurrentHealth;
 	ATTRIBUTE_ACCESSORS_BASIC(UMyAttributeSet, CurrentHealth)
 
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Attributes", ReplicatedUsing=OnRep_CurrentAmmunition)
+	FGameplayAttributeData CurrentAmmunition;
+	ATTRIBUTE_ACCESSORS_BASIC(UMyAttributeSet, CurrentAmmunition)
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Attributes", ReplicatedUsing=OnRep_MaxAmmunition)
+	FGameplayAttributeData MaxAmmunition;
+	ATTRIBUTE_ACCESSORS_BASIC(UMyAttributeSet, MaxAmmunition)
+
 	UFUNCTION()
 	void OnRep_MaxHealth(const FGameplayAttributeData& OldValue) const
 	{
@@ -38,6 +46,18 @@ public:
 	void OnRep_CurrentHealth(const FGameplayAttributeData& OldValue) const
 	{
 		GAMEPLAYATTRIBUTE_REPNOTIFY(UMyAttributeSet, CurrentHealth, OldValue);
+	}
+
+	UFUNCTION()
+	void OnRep_CurrentAmmunition(const FGameplayAttributeData& OldValue) const
+	{
+		GAMEPLAYATTRIBUTE_REPNOTIFY(UMyAttributeSet, CurrentAmmunition, OldValue);
+	}
+
+	UFUNCTION()
+	void OnRep_MaxAmmunition(const FGameplayAttributeData& OldValue) const
+	{
+		GAMEPLAYATTRIBUTE_REPNOTIFY(UMyAttributeSet, MaxAmmunition, OldValue);
 	}
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
