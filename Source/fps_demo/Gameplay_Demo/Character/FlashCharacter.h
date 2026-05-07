@@ -7,6 +7,7 @@
 #include "FlashCharacter.generated.h"
 
 class URewindComponent;
+class UVisualRewindComponent;
 
 UCLASS()
 class FPS_DEMO_API AFlashCharacter : public ACharacterBase
@@ -25,6 +26,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	TObjectPtr<URewindComponent> RewindComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	TObjectPtr<UVisualRewindComponent> VisualRewindComponent;
 public:
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;

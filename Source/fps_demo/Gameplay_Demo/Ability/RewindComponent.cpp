@@ -5,6 +5,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
+#include "Gameplay_Demo/RewindCharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 
@@ -41,7 +42,12 @@ void URewindComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 	if (bIsRewinding)
 	{
-		UpdateRewindPlayback(DeltaTime);
+		// 预测模式下，CharacterMovement 会从 PhysCustom 调用 AdvanceRewindPlayback。
+		// 组件 Tick 只驱动历史兼容/兜底的非预测路径。
+		if (!bPlaybackDrivenByMovementComponent)
+		{
+			UpdateRewindPlayback(DeltaTime);
+		}
 		return;
 	}
 
@@ -66,8 +72,34 @@ void URewindComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 
 bool URewindComponent::StartRewind()
 {
+	if (!CanStartRewind())
+	{
+		return false;
+	}
+
+	if (const ACharacter* CharacterOwner = Cast<ACharacter>(GetOwner()))
+	{
+		if (URewindCharacterMovementComponent* RewindMovement = Cast<URewindCharacterMovementComponent>(CharacterOwner->GetCharacterMovement()))
+		{
+			// 排队一个 saved move 输入 bit，而不是立刻启动。
+			// 这样 CharacterMovement 可以在服务器重放同一个开始帧。
+			return RewindMovement->RequestPredictedRewind();
+		}
+	}
+
+	// 非 Character 或没有自定义移动组件的 Owner 仍使用本地兜底路径。
+	return StartRewindPlayback(false);
+}
+
+bool URewindComponent::CanStartRewind() const
+{
+	return GetOwner() && !bIsRewinding && RewindHistory.Num() > 0;
+}
+
+bool URewindComponent::StartRewindPlayback(bool bDrivenByMovementComponent)
+{
 	AActor* OwnerActor = GetOwner();
-	if (!OwnerActor || bIsRewinding || RewindHistory.Num() == 0)
+	if (!CanStartRewind())
 	{
 		return false;
 	}
@@ -89,9 +121,11 @@ bool URewindComponent::StartRewind()
 		TargetSnapshot = RewindHistory[0];
 	}
 
+	// 端点仍按时间采样，端点之间的播放则按“当前 -> 过去”路径上的距离采样。
 	RewindPlaybackElapsedSeconds = 0.0f;
 	BuildRewindPlaybackPath(StartingSnapshot, TargetSnapshot);
 	bIsRewinding = true;
+	bPlaybackDrivenByMovementComponent = bDrivenByMovementComponent;
 
 	ApplyVisibilityState(true);
 
@@ -103,11 +137,24 @@ bool URewindComponent::StartRewind()
 			CachedCustomMovementMode = MovementComponent->CustomMovementMode;
 			bHasCachedMovementMode = true;
 			MovementComponent->StopMovementImmediately();
-			MovementComponent->DisableMovement();
+			if (!bPlaybackDrivenByMovementComponent)
+			{
+				MovementComponent->DisableMovement();
+			}
 		}
 	}
 
-	ApplySnapshot(StartingSnapshot);
+	if (bPlaybackDrivenByMovementComponent)
+	{
+		// 预测模式下 Actor 移动由 CharacterMovement 负责。
+		// 这里只应用控制旋转，避免在 saved move 重放链路之外改变位置。
+		ApplyControlRotation(StartingSnapshot);
+	}
+	else
+	{
+		ApplySnapshot(StartingSnapshot);
+	}
+
 	return true;
 }
 
@@ -127,7 +174,16 @@ void URewindComponent::FinishRewindPlayback()
 	if (RewindPlaybackPath.Num() > 0)
 	{
 		FinalSnapshot = RewindPlaybackPath.Last();
-		ApplySnapshot(FinalSnapshot);
+		if (bPlaybackDrivenByMovementComponent)
+		{
+			// 最后一次 PhysRewind tick 后，移动组件应已到达最终位置；
+			// 这里只应用视角旋转。
+			ApplyControlRotation(FinalSnapshot);
+		}
+		else
+		{
+			ApplySnapshot(FinalSnapshot);
+		}
 	}
 
 	bIsRewinding = false;
@@ -149,10 +205,16 @@ void URewindComponent::FinishRewindPlayback()
 	}
 
 	bHasCachedMovementMode = false;
+	bPlaybackDrivenByMovementComponent = false;
 	RewindPlaybackPath.Reset();
 	RewindPlaybackTotalDistance = 0.0f;
 	LastRecordTimestampSeconds = -1.0f;
+
+	// 记录一份回溯后的新状态，让后续回溯从校正后的终点开始。
 	RecordSnapshot();
+
+	// 所有状态都已经恢复并记录完成后再通知外部，避免监听方看到半清理状态。
+	OnRewindFinished.Broadcast();
 }
 
 void URewindComponent::RecordSnapshot()
@@ -240,6 +302,8 @@ void URewindComponent::BuildRewindPlaybackPath(const FRewindStateSnapshot& Start
 	RewindPlaybackPath.Reset();
 	RewindPlaybackTotalDistance = 0.0f;
 
+	// 播放路径按“现在 -> 过去”排序。RewindHistory 本身是“最旧 -> 最新”，
+	// 因此中间点需要倒序追加。
 	RewindPlaybackPath.Add(StartingSnapshot);
 
 	for (int32 Index = RewindHistory.Num() - 1; Index >= 0; --Index)
@@ -261,6 +325,7 @@ void URewindComponent::BuildRewindPlaybackPath(const FRewindStateSnapshot& Start
 	{
 		if (Index > 0)
 		{
+			// 使用累计距离让播放进度映射到空间距离，而不是历史时间戳。
 			RewindPlaybackTotalDistance += FVector::Dist(
 				RewindPlaybackPath[Index - 1].Location,
 				RewindPlaybackPath[Index].Location);
@@ -296,6 +361,7 @@ bool URewindComponent::SampleSnapshotAtDistance(float TargetDistance, FRewindSta
 
 		if (TargetDistance <= Next.DistanceAlongRewindPath)
 		{
+			// 在包含 TargetDistance 的路径段内插值。
 			const float DistanceSpan = FMath::Max(
 				Next.DistanceAlongRewindPath - Previous.DistanceAlongRewindPath,
 				KINDA_SMALL_NUMBER);
@@ -354,33 +420,54 @@ float URewindComponent::GetCurrentTimeSeconds() const
 
 void URewindComponent::UpdateRewindPlayback(float DeltaTime)
 {
+	FRewindStateSnapshot PlaybackSnapshot;
+	bool bFinished = false;
+	if (AdvanceRewindPlayback(DeltaTime, PlaybackSnapshot, bFinished))
+	{
+		ApplySnapshot(PlaybackSnapshot);
+	}
+
+	if (bFinished)
+	{
+		FinishRewindPlayback();
+	}
+}
+
+bool URewindComponent::AdvanceRewindPlayback(float DeltaTime, FRewindStateSnapshot& OutSnapshot, bool& bOutFinished)
+{
+	bOutFinished = false;
+	if (!bIsRewinding || RewindPlaybackPath.Num() == 0)
+	{
+		return false;
+	}
+
 	const float PlaybackDuration = FMath::Max(RewindPlaybackDurationSeconds, KINDA_SMALL_NUMBER);
 	RewindPlaybackElapsedSeconds = FMath::Min(RewindPlaybackElapsedSeconds + DeltaTime, PlaybackDuration);
 
 	const float PlaybackAlpha = RewindPlaybackElapsedSeconds / PlaybackDuration;
 	const float TargetDistance = RewindPlaybackTotalDistance * PlaybackAlpha;
 
-	FRewindStateSnapshot PlaybackSnapshot;
+	bool bSampledSnapshot = false;
 	if (RewindPlaybackTotalDistance <= KINDA_SMALL_NUMBER && RewindPlaybackPath.Num() >= 2)
 	{
+		// 如果 Actor 几乎没有移动，就没有可采样的距离轴。
+		// 仍然插值 Actor/控制器旋转，确保回溯能到达过去的瞄准状态。
 		const FRewindStateSnapshot& StartSnapshot = RewindPlaybackPath[0];
 		const FRewindStateSnapshot& TargetSnapshot = RewindPlaybackPath.Last();
-		PlaybackSnapshot.Location = FMath::Lerp(StartSnapshot.Location, TargetSnapshot.Location, PlaybackAlpha);
-		PlaybackSnapshot.ActorRotation = LerpRotatorShortestPath(StartSnapshot.ActorRotation, TargetSnapshot.ActorRotation, PlaybackAlpha);
-		PlaybackSnapshot.ControlRotation = LerpRotatorShortestPath(StartSnapshot.ControlRotation, TargetSnapshot.ControlRotation, PlaybackAlpha);
-		PlaybackSnapshot.TimestampSeconds = FMath::Lerp(StartSnapshot.TimestampSeconds, TargetSnapshot.TimestampSeconds, PlaybackAlpha);
-		PlaybackSnapshot.DistanceAlongRewindPath = 0.0f;
-		ApplySnapshot(PlaybackSnapshot);
+		OutSnapshot.Location = FMath::Lerp(StartSnapshot.Location, TargetSnapshot.Location, PlaybackAlpha);
+		OutSnapshot.ActorRotation = LerpRotatorShortestPath(StartSnapshot.ActorRotation, TargetSnapshot.ActorRotation, PlaybackAlpha);
+		OutSnapshot.ControlRotation = LerpRotatorShortestPath(StartSnapshot.ControlRotation, TargetSnapshot.ControlRotation, PlaybackAlpha);
+		OutSnapshot.TimestampSeconds = FMath::Lerp(StartSnapshot.TimestampSeconds, TargetSnapshot.TimestampSeconds, PlaybackAlpha);
+		OutSnapshot.DistanceAlongRewindPath = 0.0f;
+		bSampledSnapshot = true;
 	}
-	else if (SampleSnapshotAtDistance(TargetDistance, PlaybackSnapshot))
+	else
 	{
-		ApplySnapshot(PlaybackSnapshot);
+		bSampledSnapshot = SampleSnapshotAtDistance(TargetDistance, OutSnapshot);
 	}
 
-	if (RewindPlaybackElapsedSeconds >= PlaybackDuration)
-	{
-		FinishRewindPlayback();
-	}
+	bOutFinished = RewindPlaybackElapsedSeconds >= PlaybackDuration;
+	return bSampledSnapshot;
 }
 
 void URewindComponent::ApplySnapshot(const FRewindStateSnapshot& Snapshot) const
@@ -398,7 +485,15 @@ void URewindComponent::ApplySnapshot(const FRewindStateSnapshot& Snapshot) const
 		nullptr,
 		ETeleportType::TeleportPhysics);
 
-	if (APawn* PawnOwner = Cast<APawn>(OwnerActor))
+	if (Cast<APawn>(OwnerActor))
+	{
+		ApplyControlRotation(Snapshot);
+	}
+}
+
+void URewindComponent::ApplyControlRotation(const FRewindStateSnapshot& Snapshot) const
+{
+	if (const APawn* PawnOwner = Cast<APawn>(GetOwner()))
 	{
 		if (AController* Controller = PawnOwner->GetController())
 		{

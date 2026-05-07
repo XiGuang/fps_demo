@@ -50,7 +50,7 @@ protected:
 	class UInputAction* MouseLookAction;
 	
 public:
-	Afps_demoCharacter();
+	Afps_demoCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 protected:
 

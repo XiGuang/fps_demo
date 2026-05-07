@@ -3,6 +3,7 @@
 
 #include "FlashCharacter.h"
 #include "../Ability/RewindComponent.h"
+#include "../Ability/VisualRewindComponent.h"
 
 
 // Sets default values
@@ -12,6 +13,7 @@ AFlashCharacter::AFlashCharacter()
 	PrimaryActorTick.bCanEverTick = true;
 
 	RewindComponent=CreateDefaultSubobject<URewindComponent>(TEXT("RewindComponent"));
+	VisualRewindComponent=CreateDefaultSubobject<UVisualRewindComponent>(TEXT("VisualRewindComponent"));
 }
 
 // Called when the game starts or when spawned

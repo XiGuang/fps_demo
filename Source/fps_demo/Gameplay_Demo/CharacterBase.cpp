@@ -4,8 +4,10 @@
 #include "Abilities/GameplayAbility.h"
 #include "EnhancedInputComponent.h"
 #include "GameplayTagContainer.h"
+#include "RewindCharacterMovementComponent.h"
 
-ACharacterBase::ACharacterBase()
+ACharacterBase::ACharacterBase(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<URewindCharacterMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick=true;
 

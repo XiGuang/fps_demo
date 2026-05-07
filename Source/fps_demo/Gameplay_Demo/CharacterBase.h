@@ -44,7 +44,7 @@ public:
 	TObjectPtr<UMyAttributeSet> AttributeSet;
 
 	/** Constructor */
-	ACharacterBase();
+	ACharacterBase(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 	
 	virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override;
 protected:
